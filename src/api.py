@@ -6,10 +6,11 @@ utilizando o modelo de probabilidade de inundação treinado.
 """
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 import pandas as pd
 import joblib
 import os
-
+from src.map import criar_mapa
 
 app = FastAPI(
     title="AgroClima RS API",
@@ -159,7 +160,44 @@ def listar_estacoes():
     )
 
     return estacoes.to_dict(orient="records")
+# ============================================================
+# MAPA
+# ============================================================
+@app.get(
+    "/mapa",
+    response_class=HTMLResponse,
+    summary="Mapa de probabilidade estimada de inundação"
+)
+def mapa_inundacao(
+    data: str | None = Query(
+        default=None,
+        description="Data do mapa no formato AAAA-MM-DD"
+    )
+):
 
+    
+
+    try:
+
+        mapa = criar_mapa(
+            data=data
+        )
+
+        return mapa.get_root().render()
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc)
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erro ao gerar o mapa: {exc}"
+        )
 
 # ============================================================
 # INFERÊNCIA DE INUNDAÇÃO

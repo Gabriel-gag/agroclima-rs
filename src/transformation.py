@@ -813,14 +813,23 @@ def create_flood_target(
     # --------------------------------------------------------
 
     ibge_lookup = (
-        _create_municipality_ibge_lookup(
-            df_atlas
-        )
+    _create_municipality_ibge_lookup(
+        df_atlas
     )
+)
 
     df["codigo_ibge"] = (
         df["municipio_norm"]
         .map(ibge_lookup)
+    )
+
+    # Overrides das estações têm prioridade sobre o Atlas
+    station_ibge = df["station_id"].map(
+        STATION_IBGE_OVERRIDES
+    )
+
+    df["codigo_ibge"] = station_ibge.fillna(
+        df["codigo_ibge"]
     )
 
     # --------------------------------------------------------
@@ -849,8 +858,23 @@ def create_flood_target(
     )
 
     return df
+# ============================================================
+# Dicionário de substituição de código IBGE para estações
+# ============================================================
 
-
+STATION_IBGE_OVERRIDES = {
+    "A801": 4314902,  # Porto Alegre
+    "A887": 4304663,  # Capão do Leão
+    "A899": 4317301,  # Santa Vitória do Palmar
+    "B810": 4306767,  # Eldorado do Sul
+    "B817": 4305108,  # Caxias do Sul
+    "B818": 4305108,  # Caxias do Sul
+    "B825": 4314902,  # Porto Alegre
+    "B827": 4301602,  # Bagé
+    "B829": 4317301,  # Santa Vitória do Palmar
+    "B830": 4317301,  # Santa Vitória do Palmar
+    "B808": 4303103,  # Cachoeirinha
+}
 # ============================================================
 # GOLD
 # ============================================================
