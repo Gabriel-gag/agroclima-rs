@@ -134,6 +134,70 @@ def _find_column(columns, keywords):
     return None
 
 
+def _read_inmet_metadata(path):
+    """
+    Lê os metadados presentes nas primeiras linhas
+    dos arquivos históricos do INMET.
+
+    Exemplo:
+        LATITUDE:;-32,07888888
+        LONGITUDE:;-52,16777777
+        ALTITUDE:;4,92
+    """
+
+    metadata = {}
+
+    with open(
+        path,
+        "r",
+        encoding="latin1"
+    ) as f:
+
+        for _ in range(8):
+
+            line = f.readline().strip()
+
+            if not line:
+                continue
+
+            parts = line.split(";")
+
+            if len(parts) < 2:
+                continue
+
+            key = parts[0].strip()
+            value = parts[1].strip()
+
+            metadata[key] = value
+
+    def to_float(value):
+
+        if value is None:
+            return np.nan
+
+        try:
+            return float(
+                str(value)
+                .strip()
+                .replace(",", ".")
+            )
+
+        except (ValueError, TypeError):
+            return np.nan
+
+    return {
+        "latitude": to_float(
+            metadata.get("LATITUDE:")
+        ),
+        "longitude": to_float(
+            metadata.get("LONGITUDE:")
+        ),
+        "altitude": to_float(
+            metadata.get("ALTITUDE:")
+        ),
+    }
+
+
 def _read_inmet_file(path):
     """
     Lê um CSV histórico do INMET.
@@ -141,7 +205,12 @@ def _read_inmet_file(path):
     O formato dos arquivos históricos contém
     aproximadamente 8 linhas de metadados antes
     da tabela meteorológica.
+
+    Os metadados geográficos são lidos separadamente
+    para não serem descartados pelo skiprows.
     """
+
+    metadata = _read_inmet_metadata(path)
 
     df = pd.read_csv(
         path,
@@ -163,6 +232,11 @@ def _read_inmet_file(path):
         axis=1,
         how="all"
     )
+
+    # Metadados da estação
+    df["latitude"] = metadata["latitude"]
+    df["longitude"] = metadata["longitude"]
+    df["altitude"] = metadata["altitude"]
 
     return df
 
@@ -527,7 +601,9 @@ def transform_bronze_to_silver(
             # ------------------------------------------------
             # Metadados
             # ------------------------------------------------
-
+            daily["latitude"] = df["latitude"].iloc[0]
+            daily["longitude"] = df["longitude"].iloc[0]
+            daily["altitude"] = df["altitude"].iloc[0]
             daily["station_id"] = station_id
 
             daily["municipio_estacao"] = (
@@ -858,6 +934,74 @@ def create_flood_target(
     )
 
     return df
+
+def create_next_day_flood_target(df):
+    """
+    Cria o alvo de previsão D+1.
+
+    As features da data t serão utilizadas para prever
+    a ocorrência de inundação na data t+1.
+
+    O alvo só é criado quando a próxima observação
+    da estação corresponde exatamente ao dia seguinte.
+    """
+
+    df = df.copy()
+
+    required_columns = {
+        "date",
+        "station_id",
+        "inundacao"
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(
+            f"Colunas obrigatórias ausentes: {sorted(missing)}"
+        )
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        errors="coerce"
+    )
+
+    if df["date"].isna().any():
+        raise ValueError(
+            "Existem datas inválidas na coluna 'date'."
+        )
+
+    df = df.sort_values(
+        ["station_id", "date"]
+    ).reset_index(drop=True)
+
+    # Próxima data observada para a mesma estação
+    next_date = (
+        df.groupby("station_id")["date"]
+        .shift(-1)
+    )
+
+    # Próximo valor de inundação
+    next_flood = (
+        df.groupby("station_id")["inundacao"]
+        .shift(-1)
+    )
+
+    # Só aceitamos como D+1 quando a próxima
+    # observação é exatamente o dia seguinte.
+    is_next_day = (
+        next_date == df["date"] + pd.Timedelta(days=1)
+    )
+
+    df["inundacao_t1"] = next_flood.where(
+        is_next_day
+    )
+
+    df["inundacao_t1"] = (
+        df["inundacao_t1"].astype("Int64")
+    )
+
+    return df
 # ============================================================
 # Dicionário de substituição de código IBGE para estações
 # ============================================================
@@ -882,7 +1026,7 @@ STATION_IBGE_OVERRIDES = {
 def transform_silver_to_gold(
     silver_path,
     atlas_path,
-    output_path="data/gold/features_inundacao.parquet"
+    output_path="data/gold/features_inundacao_d1.parquet"
 ):
     """
     Silver -> Gold.
@@ -910,6 +1054,12 @@ def transform_silver_to_gold(
         df,
         atlas_path
     )
+
+    # --------------------------------------------------------
+    # Target D+1
+    # --------------------------------------------------------
+
+    df = create_next_day_flood_target(df)
 
     # --------------------------------------------------------
     # Features temporais
@@ -1071,22 +1221,32 @@ def transform_silver_to_gold(
 
     # --------------------------------------------------------
     # Features geográficas
+    # --------------------------------------------------------
     #
-    # Coordenadas não são conhecidas pelo processamento
-    # somente a partir do nome.
+    # Latitude, longitude e altitude são obtidas diretamente
+    # do cabeçalho dos arquivos históricos do INMET
+    # durante a transformação Bronze -> Silver.
     #
-    # Serão mantidas como NaN até que o catálogo oficial
-    # de estações seja incorporado.
+    # Aqui apenas garantimos que as colunas existam.
     # --------------------------------------------------------
 
-    if "latitude" not in df.columns:
-        df["latitude"] = np.nan
+    required_geo = [
+        "latitude",
+        "longitude",
+        "altitude"
+    ]
 
-    if "longitude" not in df.columns:
-        df["longitude"] = np.nan
+    missing_geo = [
+        col
+        for col in required_geo
+        if col not in df.columns
+    ]
 
-    if "altitude" not in df.columns:
-        df["altitude"] = np.nan
+    if missing_geo:
+        raise ValueError(
+            "Metadados geográficos ausentes: "
+            + ", ".join(missing_geo)
+        )
 
     # --------------------------------------------------------
     # Remover colunas auxiliares
@@ -1144,6 +1304,70 @@ def transform_silver_to_gold(
         f"\n  Registros: {len(df)}"
         f"\n  Estações: {df['station_id'].nunique()}"
         f"\n  Eventos de inundação: {df['inundacao'].sum()}"
+    )
+
+    return df
+
+def create_next_day_flood_target(df):
+    """
+    Cria o alvo de previsão D+1.
+
+    As features da data t serão utilizadas para prever
+    a ocorrência de inundação na data t+1.
+
+    O alvo só é criado quando a próxima observação
+    da estação corresponde exatamente ao dia seguinte.
+    """
+
+    df = df.copy()
+
+    required_columns = {
+        "date",
+        "station_id",
+        "inundacao"
+    }
+
+    missing = required_columns - set(df.columns)
+
+    if missing:
+        raise ValueError(
+            f"Colunas obrigatórias ausentes: {sorted(missing)}"
+        )
+
+    df["date"] = pd.to_datetime(
+        df["date"],
+        errors="coerce"
+    )
+
+    if df["date"].isna().any():
+        raise ValueError(
+            "Existem datas inválidas na coluna 'date'."
+        )
+
+    df = df.sort_values(
+        ["station_id", "date"]
+    ).reset_index(drop=True)
+
+    next_date = (
+        df.groupby("station_id")["date"]
+        .shift(-1)
+    )
+
+    next_flood = (
+        df.groupby("station_id")["inundacao"]
+        .shift(-1)
+    )
+
+    is_next_day = (
+        next_date == df["date"] + pd.Timedelta(days=1)
+    )
+
+    df["inundacao_t1"] = next_flood.where(
+        is_next_day
+    )
+
+    df["inundacao_t1"] = (
+        df["inundacao_t1"].astype("Int64")
     )
 
     return df
