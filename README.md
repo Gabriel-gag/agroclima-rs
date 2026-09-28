@@ -1,208 +1,424 @@
-# AgroClima RS — Pipeline de Dados Meteorológicos (Sul do RS)
+#AgroClima RS
 
-Projeto de Engenharia de Dados para ingestão, padronização e disponibilização de medições meteorológicas do INMET e APIs abertas, com foco na Região Intermediária de Pelotas e Bagé (código IBGE 4302). 
+> Pipeline de dados meteorológicos e estimativa de probabilidade de inundação para municípios do Rio Grande do Sul.
 
-O objetivo principal é transformar dados horários brutos em tabelas analíticas diárias (arquitetura Medallion) e alimentar modelos de previsão de chuva no dia seguinte (D+1).
+O **AgroClima RS** combina dados meteorológicos do **INMET**, registros históricos de desastres, dados geográficos dos municípios e previsões meteorológicas do **Open-Meteo** para construir um pipeline de dados e um modelo de Machine Learning capaz de estimar a probabilidade de ocorrência de **inundação**.
 
----
-
-## 1. Visão Geral e Recorte Territorial
-
-Em vez de tentar processar o país inteiro de forma genérica, o projeto foca em uma região climática e agrícola homogênea: a **Região Geográfica Intermediária de Pelotas (IBGE 4302)**, que engloba as regiões imediatas de Pelotas e Bagé.
-
-Foram selecionadas **10 estações meteorológicas automáticas do INMET** com histórico consistente em 2026:
-- Pelotas / Capão do Leão (`A887`)
-- Bagé (`A827`)
-- Rio Grande (`A802`)
-- Santa Vitória do Palmar (`A899`)
-- Camaquã (`A838`)
-- Jaguarão (`A836`)
-- Canguçu (`A811`)
-- Pinheiro Machado (`B823`)
-- Aceguá (`B828`)
-- Herval (`B826`)
-
-*Nota metodológica:* Estações com falhas graves ou mais de 30% de dados ausentes (como Dom Pedrito `A881`) foram descartadas na etapa de qualidade para não degradar os modelos.
+O projeto também gera um **mapa interativo do Rio Grande do Sul**, permitindo consultar o histórico e visualizar previsões para os próximos **16 dias**.
 
 ---
 
-## 2. Arquitetura do Pipeline
+## Objetivo
 
-O fluxo segue o padrão de camadas (Bronze -> Prata -> Ouro):
+O projeto busca responder:
 
-```text
-Fontes (INMET ZIP / Open-Meteo API)
-       │
-       ▼
-Bronze (data/bronze/)
-- CSVs brutos das estações
-- Preservação dos dados originais sem alteração
-       │
-       ▼
-Prata (data/silver/fact_weather_daily)
-- Limpeza de cabeçalhos de metadados
-- Conversão de sentinelas (-9999 para NaN) e tipos numéricos
-- Agregação horária para diária (24h)
-- Chave natural: station_id + date
-       │
-       ▼
-Ouro (data/gold/features_rain_d1)
-- Lags temporais (D-1, D-2) e acumulados móveis (3d, 7d)
-- Cálculo da variação barométrica de 24h (queda de pressão)
-- Alvo binário D+1: rain_tomorrow (precipitação >= 1.0 mm)
-       │
-       ├─────────────────────────┐
-       ▼                         ▼
-Modelos de Machine Learning    Catálogo AWS Glue / Athena
-(Logistic Reg, RF, XGBoost)    (Consultas SQL analíticas)
-```
+1. Como as condições meteorológicas se relacionam com a ocorrência de inundações no histórico?
+2. Dadas as condições meteorológicas previstas, qual é a probabilidade estimada de inundação nos próximos dias?
+
+O resultado é uma estimativa probabilística para análise exploratória e visualização de risco.
+
+> **Importante:** a saída do modelo não representa uma previsão determinística de que uma inundação ocorrerá. Trata-se de uma **probabilidade estimada pelo modelo**, condicionada aos dados e às hipóteses utilizadas.
 
 ---
 
-## 3. Estrutura de Diretórios
+## Principais resultados
 
-```text
-agroclima-rs/
-├── README.md
-├── requirements.txt
-├── notebook/
-│   └── AgroClima_RS_Pelotas_4302_aprimorado.ipynb   # Execução interativa no Google Colab
-├── src/
-│   ├── ingestion.py                                # Coleta INMET ZIP / Open-Meteo
-│   ├── transformation.py                           # Regras Bronze -> Prata -> Ouro
-│   └── pipeline.py                                 # Orquestrador local de ponta a ponta
-├── data/
-│   ├── bronze/                                     # Arquivos brutos
-│   ├── silver/                                     # fact_weather_daily (.parquet e .csv)
-│   └── gold/                                       # features_rain_d1 (.parquet e .csv)
-├── terraform/
-│   ├── main.tf                                     # Infraestrutura AWS (S3, Glue Catalog)
-│   ├── variables.tf
-│   └── outputs.tf
-├── tests/
-│   └── test_pipeline.py                            # Testes unitários das transformações
-```
+O projeto produz:
+
+- probabilidades estimadas de inundação por estação;
+- consolidação das probabilidades por município usando o código IBGE;
+- previsão para 16 dias;
+- ranking dos municípios pela probabilidade acumulada;
+- mapa interativo com histórico e previsão;
+- painel com o Top 5 dos municípios por probabilidade acumulada.
+
+Na execução mais recente do pipeline de previsão:
+
+- **100 estações** processadas;
+- **1.600 previsões** geradas;
+- **88 municípios** associados a códigos IBGE válidos;
+- **16 dias de previsão por estação**.
+
 
 ---
 
-## 4. Dicionário de Dados
+## Arquitetura
 
-### `fact_weather_daily` (Camada Prata)
-- `station_id` (string): Código WMO da estação (ex: `A887`).
-- `date` (date): Data da observação (`AAAA-MM-DD`).
-- `codigo_ibge` (int): Código IBGE do município sede da estação.
-- `municipio` (string): Nome do município.
-- `precip_mm` (float): Volume total de chuva no dia.
-- `temp_min`, `temp_max`, `temp_avg` (float): Temperaturas mínima, máxima e média do ar (°C).
-- `humidity_avg` (float): Umidade relativa média diária (%).
-- `pressure_avg` (float): Pressão atmosférica média diária ao nível da estação (hPa).
-- `wind_speed` (float): Velocidade média do vento (m/s).
-- `solar_radiation` (float): Radiação solar global acumulada diária (MJ/m²).
+O pipeline utiliza uma organização inspirada na arquitetura Medallion:
 
-### `features_rain_d1` (Camada Ouro)
-- `rain_tomorrow` (int): Variável alvo (1 se precipitação em D+1 for >= 1.0 mm, senão 0).
-- `pressure_change_24h` (float): Delta da pressão em 24h ($P_t - P_{t-1}$). Quedas bruscas indicam aproximação de frentes frias.
-- `precip_sum_3d`, `precip_sum_7d` (float): Chuva acumulada nos últimos 3 e 7 dias.
-- `dry_days` (int): Contagem de dias secos consecutivos até a data atual.
-- `day_of_year_sin`, `day_of_year_cos` (float): Codificação cíclica do dia do ano para sazonalidade.
-- `precip_lag_1d` (float): Chuva do dia anterior (D-1).
-- `precip_lag_2d` (float): Chuva de dois dias antes (D-2).
-- `rain_days_7d` (int): Número de dias com chuva (>= 1,0 mm) nos últimos 7 dias.
-- `temp_avg_3d` (float): Média móvel da temperatura média nos últimos 3 dias.
-- `humidity_avg_3d` (float): Média móvel da umidade relativa nos últimos 3 dias.
-- `lat`, `lon` (float): Latitude e longitude da estação.
-- `altitude` (float): Altitude da estação (m).
-- `precip_tomorrow` (float): Volume de chuva do dia seguinte; usado para derivar `rain_tomorrow`, não entra como feature no modelo.
-
----
-
-## 5. Resultados de Validação (Modelagem)
-
-A validação foi feita com divisão temporal estrita (*out-of-time*) para evitar vazamento do futuro:
-- **Treino:** Janeiro a Junho de 2026 (1.742 registros)
-- **Teste cego (Holdout):** Julho e Agosto de 2026 (533 registros)
-
-| Modelo                  | ROC-AUC    | F1-Score | Características                                 |
-| ----------------------- | ---------- | -------- | ----------------------------------------------- |
-| **Logistic Regression** | 0.7909     | 0.6911   | Baseline linear simples com dados normalizados  |
-| **Random Forest**       | **0.8035** | 0.6568   | Melhor capacidade de separação probabilística   |
-| **XGBoost**             | 0.6663     | 0.3614   | Precisa de tuning; recall baixo pra classe chuva |
-
-*Nota:* a classificação usa threshold de 0,30 (não o padrão 0,5) pra decidir "vai chover" a partir da probabilidade prevista.
-
-A feature com maior ganho de informação no Random Forest foi a **variação barométrica em 24h (`pressure_change_24h`)**, seguida da **sazonalidade do ano (`day_of_year_sin`/`day_of_year_cos`)** e de **temperatura mínima e radiação solar**. No XGBoost a ordem muda ligeiramente (temperatura mínima aparece em primeiro), mas a pressão barométrica e a sazonalidade seguem entre as mais relevantes nos dois modelos.
+    INMET / Atlas
+          │
+          ▼
+       BRONZE
+    Dados brutos
+          │
+          ▼
+       SILVER
+    Dados diários
+          │
+          ▼
+        GOLD
+    Features + target
+          │
+          ├──────────────────┐
+          ▼                  ▼
+    Machine Learning     Open-Meteo
+    Modelo calibrado    Previsão 16d
+          │                  │
+          └────────┬─────────┘
+                   ▼
+          Probabilidades de
+             inundação
+                   │
+          ┌────────┴────────┐
+          ▼                 ▼
+       Ranking             Mapa
+      municipal         interativo
 
 ---
 
-## 6. Como Executar
+## Definição do problema
 
-### Ambiente Local
-```bash
-# 1. Instalar dependências
-pip install -r requirements.txt
+O alvo utilizado pelo modelo é:
 
-# 2. Rodar os testes unitários
-python3 -m unittest discover -s tests
+    inundacao_t1 = ocorrência de inundação no dia seguinte
 
-# 3. Rodar o pipeline completo
-python3 src/pipeline.py
-```
+As variáveis meteorológicas do dia t são utilizadas para estimar a ocorrência no dia t+1.
 
-### No Google Colab
-1. Abra o arquivo `notebook/AgroClima_RS_Pelotas_4302_aprimorado.ipynb` no Colab.
-2. Faça o upload do arquivo `data/gold/features_rain_d1_sul_rs_2026.csv` na pasta `/content/`.
-3. Execute todas as células em sequência.
+Essa formulação D+1 permite separar as variáveis de entrada do evento que está sendo previsto.
 
 ---
 
-## 7. Próximos Passos e Limitações
+## Modelo de Machine Learning
 
-- **Série Temporal:** Os dados atuais cobrem 8 meses de 2026. Para colocar o modelo em produção agronômica, a ingestão deve ser estendida para uma janela de 5 a 10 anos.
-- **Camada Agrícola:** Dados sintéticos de produtividade foram propositalmente descartados. A correlação agrícola será integrada na próxima fase usando dados oficiais consolidados da PAM/IBGE e CONAB.
-- **Nuvem:** O repositório inclui a infraestrutura inicial em Terraform (`terraform/`) para provisionar o bucket S3 e o catálogo no AWS Glue / Athena.
+O modelo utilizado para gerar as probabilidades operacionais é uma **Regressão Logística calibrada**.
+
+Divisão temporal:
+
+| Período | Uso |
+|---|---|
+| 2006–2019 | Treinamento |
+| 2020–2023 | Calibração |
+| 2024–2025 | Holdout temporal |
+
+A calibração utiliza o método **sigmoid** do Scikit-learn.
+
+O artefato utilizado na previsão é:
+
+    src/model_calibrado.joblib
+
+O artefato armazena as features e o modelo calibrado.
+
+### Principais features
+
+**Precipitação**
+- precipitação diária;
+- acumulados de 24h, 48h e 72h;
+- acumulados de 3 e 7 dias;
+- dias com chuva nos últimos 7 dias;
+- dias secos nos últimos 7 dias.
+
+**Condições atmosféricas**
+- temperatura mínima, máxima e média;
+- média móvel da temperatura;
+- umidade média;
+- média móvel da umidade;
+- pressão atmosférica;
+- variação da pressão em 24h;
+- velocidade média do vento;
+- radiação solar.
+
+**Sazonalidade e localização**
+- seno e cosseno do dia do ano;
+- altitude;
+- latitude;
+- longitude.
 
 ---
 
-## 8. API de Consulta e Inferência ao Vivo (`src/api.py`)
+## Avaliação
 
-O projeto disponibiliza uma API REST em **FastAPI** que executa **inferência em tempo real** utilizando o modelo Random Forest treinado e serializado (`src/model.joblib`):
+A avaliação principal utiliza um **holdout temporal de 2024–2025**, separado do período de treinamento e calibração.
 
-```bash
-# 1. (Opcional) Re-treinar e serializar o modelo Random Forest
-python3 src/train.py
+São calculadas:
 
-# 2. Iniciar o servidor da API
-uvicorn src.api:app --reload --port 8000
-```
+- **PR-AUC**;
+- **ROC-AUC**;
+- **Brier Score**.
 
-- **Documentação interativa Swagger:** `http://localhost:8000/docs`
-- **Rotas principais:**
-  - `GET /estacoes`: Retorna a lista das 10 estações e municípios monitorados com suas coordenadas.
-  - `GET /previsao?station_id=A887`: Alimenta o vetor de features da data informada no pipeline do modelo treinado (`model.joblib`), calculando a probabilidade de chuva ao vivo e aplicando o threshold de decisão (0,30).
+O uso de PR-AUC é especialmente relevante devido ao forte desbalanceamento entre eventos de inundação e não-eventos.
+
 
 ---
 
-## 9. Testes Automatizados
+## Previsão meteorológica
 
-O repositório inclui testes unitários que cobrem as funções reais de transformação de dados e a inferência da API:
+A previsão futura utiliza a API do **Open-Meteo**.
 
-```bash
-python3 -m unittest discover -s tests
-```
+Para cada estação são obtidos:
+
+- 7 dias de contexto histórico recente;
+- 16 dias de previsão.
+
+Os dados horários são agregados para escala diária e transformados nas mesmas features esperadas pelo modelo histórico.
+
+Variáveis meteorológicas utilizadas:
+
+- temperatura;
+- umidade relativa;
+- precipitação;
+- probabilidade de precipitação;
+- pressão atmosférica;
+- velocidade do vento;
+- rajadas;
+- radiação solar.
 
 ---
 
-## 10. Obtenção dos Dados Brutos do INMET (`2026.zip`)
+## Probabilidade acumulada em 16 dias
 
-Por limitações de cota do GitHub (arquivos > 50 MB), o pacote bruto nacional de 2026 não é versionado integralmente no repositório. O repositório já inclui na pasta `data/bronze/` os CSVs extraídos das 10 estações do Sul do RS.
+As estações são consolidadas por código IBGE.
 
-Caso deseje reexecutar a extração a partir do pacote nacional completo:
-1. Acesse o portal oficial do [INMET BDMEP](https://portal.inmet.gov.br/dadoshistoricos).
-2. Baixe o arquivo anual compactado `2026.zip`.
-3. Posicione o arquivo na raiz do projeto ou informe o caminho ao executar `python3 src/pipeline.py`.
+Quando existem várias estações associadas ao mesmo município, o pipeline utiliza a **maior probabilidade diária** entre elas.
+
+A probabilidade de pelo menos uma ocorrência durante os 16 dias é calculada por:
+
+    P(acumulada) = 1 - produto(1 - p_d)
+
+onde p_d é a probabilidade estimada para cada dia.
+
+### Hipótese
+
+O cálculo assume **independência entre os dias**. Portanto, a probabilidade acumulada é uma estimativa derivada do modelo sob essa hipótese, e não uma probabilidade observacional direta.
 
 ---
 
-## 11. Licença
+## Mapa interativo
+
+O arquivo **src/map.py** gera um mapa utilizando **Folium**.
+
+### Histórico
+
+Permite consultar a probabilidade estimada para uma data disponível na base histórica, juntamente com:
+
+- município;
+- código IBGE;
+- probabilidade estimada para D+1;
+- chuva acumulada em 24h, 72h e 7 dias;
+- temperatura média;
+- umidade;
+- pressão;
+- variação da pressão em 24h.
+
+### Previsão
+
+Permite selecionar:
+
+- D+1;
+- D+2;
+- ...
+- D+16.
+
+Também apresenta o **Top 5 municipal** pela probabilidade acumulada no horizonte de 16 dias.
+
+O arquivo gerado é:
+
+    mapa_inundacao_rs.html
+
+Como o HTML incorpora o conteúdo geográfico necessário para o mapa, seu tamanho é elevado. Ele deve ser tratado como um **artefato gerado**, e não como a principal fonte de reprodução do projeto.
+
+---
+
+## Estrutura do repositório
+
+    agroclima-rs/
+    ├── README.md
+    ├── requirements.txt
+    ├── .gitignore
+    │
+    ├── data/
+    │   ├── atlas/
+    │   ├── bronze/
+    │   ├── silver/
+    │   ├── gold/
+    │   ├── forecast/
+    │   └── geo/
+    │
+    ├── notebook/
+    │   └── AgroClima_RS_Pelotas_4302_aprimorado.ipynb
+    │
+    ├── src/
+    │   ├── ingestion.py
+    │   ├── transformation.py
+    │   ├── pipeline.py
+    │   ├── modeling.py
+    │   ├── train.py
+    │   ├── calibrar.py
+    │   ├── model_calibrado.joblib
+    │   ├── forecast.py
+    │   ├── forecast_features.py
+    │   ├── predict_forecast.py
+    │   ├── gerar_previsao_rs.py
+    │   ├── raking_previsao.py
+    │   ├── create_geojson.py
+    │   └── map.py
+    │
+    ├── tests/
+    │   └── test_pipeline.py
+    │
+    └── terraform/
+
+
+> O fluxo principal da versão atual utiliza **model_calibrado.joblib**, **gerar_previsao_rs.py**, **raking_previsao.py** e **map.py**. Alguns scripts presentes no repositório correspondem a etapas ou experimentos anteriores.
+
+---
+
+## Como executar
+
+### 1. Instalar dependências
+
+    python -m pip install -r requirements.txt
+
+### 2. Executar os testes
+
+    python -m unittest discover -s tests
+
+### 3. Gerar as previsões de 16 dias
+
+Com o dataset Gold disponível:
+
+    python src/gerar_previsao_rs.py
+
+Saída:
+
+    data/forecast/probabilidades_inundacao_16d.parquet
+
+### 4. Gerar o ranking municipal
+
+    python src/raking_previsao.py
+
+Saída:
+
+    data/forecast/ranking_municipios_16d.parquet
+
+### 5. Gerar o mapa
+
+    python src/map.py
+
+Saída:
+
+    mapa_inundacao_rs.html
+
+---
+
+## Testes
+
+Os testes automatizados estão em:
+
+    tests/test_pipeline.py
+
+Execute com:
+
+    python -m unittest discover -s tests
+
+---
+
+## Dados
+
+### INMET
+
+Fornece as séries meteorológicas históricas das estações utilizadas no pipeline.
+
+### Atlas de Desastres
+
+Fornece os registros históricos de desastres utilizados para construir o target de inundação.
+
+### Open-Meteo
+
+Fornece as condições meteorológicas previstas utilizadas na etapa operacional de previsão.
+
+### Dados geográficos
+
+Os dados municipais do Rio Grande do Sul são utilizados para relacionar as probabilidades aos códigos IBGE e gerar o mapa.
+
+---
+
+## Limitações
+
+### Eventos raros
+
+Inundações representam uma parcela muito pequena das observações. O problema é, portanto, altamente desbalanceado.
+
+### Probabilidade estimada ≠ risco real
+
+A probabilidade produzida pelo modelo representa a relação aprendida entre as variáveis disponíveis e os eventos históricos.
+
+Uma avaliação completa de risco deveria incorporar também:
+
+- exposição populacional;
+- vulnerabilidade;
+- uso e cobertura do solo;
+- relevo e declividade;
+- proximidade de rios;
+- características da drenagem;
+- infraestrutura urbana.
+
+Assim, o projeto deve ser entendido como um **modelo de probabilidade associada à ocorrência de inundação**, e não como uma avaliação completa de risco socioambiental.
+
+### Dependência entre dias
+
+A probabilidade acumulada de 16 dias assume independência entre as probabilidades diárias. Eventos meteorológicos reais possuem dependência temporal.
+
+### Previsões meteorológicas
+
+As previsões do Open-Meteo são atualizadas continuamente. Uma nova execução pode produzir probabilidades diferentes para o mesmo período futuro.
+
+### Dados
+
+A cobertura histórica e a qualidade das observações variam entre estações e períodos.
+
+---
+
+## Próximos passos
+
+- incorporar declividade e distância a rios;
+- incluir população e exposição territorial;
+- comparar Random Forest, XGBoost e outros modelos;
+- melhorar a calibração probabilística;
+- utilizar validação temporal com janelas móveis;
+- estudar dependência temporal entre probabilidades diárias;
+- automatizar a atualização das previsões;
+- disponibilizar o mapa através de uma aplicação web;
+- reduzir o tamanho dos artefatos geográficos e dos dados versionados;
+
+---
+
+## Tecnologias
+
+- **Python**
+- **Pandas**
+- **NumPy**
+- **Scikit-learn**
+- **XGBoost**
+- **PyArrow / Parquet**
+- **Requests**
+- **Folium**
+- **FastAPI**
+- **Matplotlib**
+- **Seaborn**
+- **Terraform / AWS**
+
+---
+
+## Fontes
+
+- [INMET — Instituto Nacional de Meteorologia](https://portal.inmet.gov.br/)
+- [Open-Meteo](https://open-meteo.com/)
+- [Atlas Brasileiro de Desastres](https://s2id.mi.gov.br/)
+- [IBGE](https://www.ibge.gov.br/)
+
+---
+
+## Licença
 
 Este projeto é disponibilizado sob a licença [MIT](https://opensource.org/licenses/MIT).
