@@ -1623,7 +1623,7 @@ def criar_mapa(
                 "Código IBGE:"
             ],
             localize=True,
-            sticky=True,gis
+            sticky=True,
             labels=True,
             style="""
                 background-color: white;
