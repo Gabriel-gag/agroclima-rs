@@ -135,7 +135,7 @@ def criar_features_forecast(
 
     df["rain_days_7d"] = (
         df["precip_mm"]
-        .gt(0)
+        .ge(1)
         .rolling(
             window=7,
             min_periods=7,
@@ -145,7 +145,7 @@ def criar_features_forecast(
 
     df["dry_days_7d"] = (
         df["precip_mm"]
-        .eq(0)
+        .lt(1)
         .rolling(
             window=7,
             min_periods=7,

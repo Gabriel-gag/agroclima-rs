@@ -66,6 +66,7 @@ def validar_features(
                 for coluna in faltantes
             )
         )
+    
 
 
 def prever_inundacao(
@@ -166,3 +167,4 @@ if __name__ == "__main__":
             f"Target: "
             f"{modelo['target']}"
         )
+

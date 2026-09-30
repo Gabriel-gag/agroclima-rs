@@ -4,6 +4,7 @@ import json
 import joblib
 import folium
 import pandas as pd
+import copy
 
 from branca.element import Element
 
@@ -970,6 +971,7 @@ def criar_camada_previsao(
     dia_previsao,
     data_previsao
 ):
+    geojson = copy.deepcopy(geojson)
 
     df_geo = (
         df_dia
@@ -1276,7 +1278,7 @@ def criar_camada_acumulada(
                 "Município:",
                 "Código IBGE:"
             ],
-            localize=True,
+            localize=False,
             sticky=True,
             labels=True,
             style="""
